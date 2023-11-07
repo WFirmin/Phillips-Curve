@@ -1,0 +1,570 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+rm(list=ls())
+library(tseries)
+library(tidyr)
+library(zoo)
+library(forecast)
+library(ARDL)
+unemp = read.csv("UNRATE.csv")
+cpce = read.csv("PCEPILFE.csv")
+
+K = 1
+cpce$PCEPILFE = c(rep(NA,K),diff(log(cpce$PCEPILFE), lag=K))*100
+wages = read.csv("WAGES.csv")
+wages$wage_growth = c(rep(NA,K),diff(log(wages$AHETPI), lag=K))*100
+fedFunds = read.csv("FEDFUNDS.csv")
+fedFunds$fund_growth = c(rep(NA,K), diff(fedFunds$FEDFUNDS, lag=K))
+gdp = read.csv("GDP.csv")
+gdp$GDP = c(NA, diff(log(gdp$GDP)))*100
+nrUnemp = read.csv("NROU.csv")
+INF_E = read.csv("EXPINF1YR.csv")
+
+data = merge(unemp, cpce, by="DATE", all=T)
+data = merge(data, wages, by="DATE", all.x=T)
+data = merge(data, gdp, by="DATE",all.x=T)
+data = merge(data, fedFunds, by="DATE",all.x=T)
+data = merge(data, nrUnemp, by="DATE",all.x=T)
+data = merge(data, INF_E, by="DATE",all.x=T)
+
+for(i in (1:length(data$GDP))){
+  if(is.na(data$GDP[i])){
+    data$GDP[i] = data$GDP[i-1]
+  if(is.na(data$NROU[i])){
+    data$NROU[i] = data$NROU[i-1]
+  }
+  }
+}
+
+colnames(data) = c("DATE","UNEMP","INFL","WAGES","WAGE_GROWTH", "NGDP", "FEDFUNDS","FEDFUNDS_GROWTH","NR_UNEMP", "INF_E")
+data = na.omit(data)
+data$DATE = as.Date(data$DATE)
+
+data$UNEMP_UN = data$UNEMP - data$NR_UNEMP
+data$REL_UNEMP = (data$UNEMP-data$NR_UNEMP)/data$UNEMP
+
+start = c(1965,1)
+unemp = ts(data$UNEMP, start=start, frequency=12)
+infl = ts(data$INFL, start=start, frequency=12)
+wage = ts(data$WAGE_GROWTH, start=start, frequency=12)
+ngdp = ts(data$NGDP, start=start, frequency=12)
+funds=ts(data$FEDFUNDS, start=start, frequency=12)
+```
+
+
+```{r}
+library(tis)
+plot(ngdp, ylim=c(-10,15), col="blue", main="Raw Data")
+nberShade()
+lines(infl, col="red")
+lines(unemp)
+lines(wage, col="green")
+lines(funds, col="grey")
+abline(h=0)
+
+
+k = 6
+dInfl = diff(infl, k)
+dUnemp = diff(unemp, k)
+dWage = diff(wage, k)
+dFunds = diff(funds,k)
+plot(dFunds, col="grey", main="Change")
+nberShade()
+lines(dUnemp)
+lines(dWage, col="green")
+lines(dInfl, col="red")
+abline(h=0)
+
+
+```
+
+```{r}
+# Rolling linear regression: try weighted local next
+roll = 24
+ci = data.frame()
+for(i in (roll:dim(data)[1])){
+  reg = lm(INFL ~ REL_UNEMP, data=data[data$DATE <= data$DATE[i] & data$DATE >= data$DATE[i-roll+1],])
+  s = summary(reg)$coefficients
+  point = s[rownames(s) == "REL_UNEMP",1]
+  std = s[rownames(s) == "REL_UNEMP",2]
+  ci = rbind(ci, c(i, point, std))
+}
+colnames(ci) = c("i","point","std")
+
+plot(data$DATE[(roll:dim(data)[1])],ci$point, type="l", xlab="Date",ylab="Coefficient")
+lines(data$DATE[(roll:dim(data)[1])], ci$point + 2.07*ci$std, type="l", col="red")
+lines(data$DATE[(roll:dim(data)[1])], ci$point - 2.07*ci$std, type="l", col="red")
+abline(h=0)
+
+saveData = cbind(data$DATE[(roll:dim(data)[1])], ci)
+colnames(saveData) = c("Date","i","Est1","Std1")
+
+ci = data.frame()
+for(i in (roll:dim(data)[1])){
+  reg = lm(WAGE_GROWTH ~ REL_UNEMP, data=data[data$DATE <= data$DATE[i] & data$DATE >= data$DATE[i-roll+1],])
+  s = summary(reg)$coefficients
+  point = s[rownames(s) == "REL_UNEMP",1]
+  std = s[rownames(s) == "REL_UNEMP",2]
+  ci = rbind(ci, c(i, point, std))
+}
+colnames(ci) = c("i","point","std")
+
+
+plot(data$DATE[(roll:dim(data)[1])],ci$point, type="l", xlab="Date",ylab="Coefficient")
+lines(data$DATE[(roll:dim(data)[1])], ci$point + 2.07*ci$std, type="l", col="red")
+lines(data$DATE[(roll:dim(data)[1])], ci$point - 2.07*ci$std, type="l", col="red")
+abline(h=0)
+
+saveData = cbind(saveData, ci)
+saveData = saveData[colnames(saveData)!="i"]
+colnames(saveData) = c("Date","EstPCE","StdPCE","EstWage","StdWage")
+write.csv(saveData, "rollingRegression.csv",row.names=F)
+```
+
+```{r}
+data$UNEMP_1 = c(NA, lag(data$UNEMP[1:(dim(data)[1]-1)],k=1))
+data$INFL_1 = c(NA, lag(data$INFL[1:(dim(data)[1]-1)],k=1))
+data$WAGE_GROWTH_1 = c(NA, lag(data$WAGE_GROWTH[(1:(dim(data)[1]-1))], k=1))
+data$INF_E_1 = c(rep(NA,4),lag(data$INF_E[1:(dim(data)[1]-4)],k=4))
+data$unemp_change = c(NA,diff(data$UNEMP))
+data$unemp_un_change = c(NA,diff(data$UNEMP_UN))
+data = na.omit(data)
+```
+
+
+```{r}
+
+regTot = lm(WAGE_GROWTH ~ INFL_1 + WAGE_GROWTH_1 + UNEMP_UN+ unemp_un_change + INF_E_1 + NGDP + FEDFUNDS + FEDFUNDS_GROWTH , data=data)
+regTot2 = lm(INFL ~ INFL_1 + WAGE_GROWTH_1 + UNEMP_UN+ unemp_un_change + INF_E_1 + NGDP + FEDFUNDS + FEDFUNDS_GROWTH , data=data)
+summary(regTot)
+
+library(zoo)
+library(tis)
+start = c(1982,5)
+end = c(2022,9)
+actual = ts(data$WAGE_GROWTH, start=start, frequency=12)
+pred = ts(regTot$fitted.values,end=end, frequency=12)
+ma = rollmean(actual, k=6)
+
+plot(actual,type='l')
+nberShade()
+lines(actual,type='l')
+lines(pred, type='l', col='red')
+lines(ma, type='l',col='blue')
+abline(h=2/12)
+abline(h=0)
+
+library(stargazer)
+stargazer(regTot2, regTot, type="latex", column.labels=c("Core PCE","Wage Growth"), star.cutoffs=c(0.05,0.01,0.001), style="qje")
+```
+
+
+
+Reproducing paper:
+```{r}
+rm(list=ls())
+library(stargazer)
+library(readxl)
+library(tidyr)
+pce =read.csv("PCEPILFE.csv") 
+unemp = read.csv("UNRATE.csv")
+nunemp = read.csv("NROU.csv")
+infE = read.csv("EXPINF1YR.csv")
+imp = read_excel("Imported.xlsx")
+dom = read_excel("Domestic.xlsx")
+np = read.csv("NonPetr.csv")
+ex = read.csv("Exchange.csv")
+nber = read.csv("NBER.csv")
+wages = read.csv("WAGES.csv")
+gdp = read.csv("GDP.csv")
+
+imp = gather(imp, Month, pImp, Jan:Dec)
+imp$DATE = as.Date(paste(imp$Year, imp$Month, "1",sep="-"), format="%Y-%h-%d")
+dom = gather(dom, Month, pDom, Jan:Dec)
+dom$DATE = as.Date(paste(dom$Year, dom$Month, "1",sep="-"), format="%Y-%h-%d")
+imp = merge(imp, dom)
+imp$rel = imp$pImp / imp$pDom
+imp$import = c(rep(NA,12),diff(log(imp$rel),lag=12))
+imp = imp[c(3,7)]
+
+data= merge(pce, unemp, all=T)
+data = merge(data, gdp, all=T)
+data = merge(data, wages, all=T)
+data = merge(data, infE, all=T)
+data = merge(data, nber, all=T)
+data = merge(data, nunemp, all=T)
+data = merge(data, np, all=T)
+data = merge(data, ex, all=T)
+data$DATE = as.Date(data$DATE)
+data = merge(data, imp, all=T)
+colnames(data)= c("Date","CPCE","Unemp","NGDP","Wages","eInf","NBER","NatUnemp","NonPetrol","Exchange","RelImports")
+data = data[!is.na(data$NatUnemp),]
+
+for(i in (2:dim(data)[1])){
+  if(is.na(data$NonPetrol[i])){
+    data$NonPetrol[i] = data$NonPetrol[i-1]
+  }
+}
+
+Lag = function(vName, k=1){
+  return(c(rep(NA,k),data[(1:(dim(data)[1]-k)),vName]))
+}
+
+data$Inflation = c(NA,diff(log(data$CPCE)))
+data$NGDP_GrowthQ = c(NA,diff(log(data$NGDP)))
+data$NGDP_GrowthY = c(rep(NA,4),diff(log(data$NGDP),4))
+
+for(i in (1:6)){
+  data[paste0("Inf_",i)] = Lag("Inflation",i)
+}
+
+
+data$Exchange = c(NA,diff(log(data$Exchange)))
+#data["eInf_1"] = Lag("eInf")
+data["RelImports_1"] = Lag("RelImports")
+
+data["Exchange_1"] = Lag("Exchange")
+
+data$NGDP_GrowthQ_1 = Lag("NGDP_GrowthQ")
+data$NGDP_GrowthY_1 = Lag("NGDP_GrowthY")
+
+data$NonPetrol = c(NA,diff(log(data$NonPetrol)))
+data["NonPetrol_1"] = Lag("NonPetrol")
+
+data$RelUnemp = (data$Unemp - data$NatUnemp) / data$Unemp
+
+# Wage Growth:
+data$WageGrowth = c(NA, diff(log(data$Wages)))
+for(i in (1:6)){
+  data[paste0("WageGrowth_",i)] = Lag("WageGrowth",i)
+}
+
+#quarters before/after recession:
+data = data[!is.na(data$NBER),]
+data$DistF = NA
+count = NA
+for(i in (1:dim(data)[1])){
+  if(data$NBER[i] == 1){
+    count = 0
+  } else {count = count + 1}
+  data[i,"DistF"] = count
+}
+
+data$DistB = NA
+count = NA
+for(j in (1:dim(data)[1])){
+  i = dim(data)[1] - j + 1
+  if(data$NBER[i] == 1){
+    count = 0
+  } else {count = count + 1}
+  data[i,"DistB"] = count
+}
+
+data$Dist = data$DistF
+data$DistB[is.na(data$DistB)] = 100
+data$Dist[data$Dist > data$DistB] = -data$DistB[data$Dist > data$DistB]
+data$Dist = ceiling(data$Dist/4)
+data$Dist[data$Dist > 3 | data$Dist < -2] = -10
+data$DistF = ceiling(data$DistF/4)
+data$DistB = ceiling(data$DistB/4)
+
+data = na.omit(data)
+
+
+```
+
+```{r}
+# From the paper:
+formula = as.formula(paste0("Inflation ~ NBER +",paste(colnames(data)[c((15:22),25,26,6)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$Inflation, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+```
+
+
+
+
+```{r}
+# Modification with interaction term for unemployment and NBER, along with NGDP growth as a control:
+formula = as.formula(paste0("Inflation ~ NBER + as.factor(NBER):RelUnemp +NGDP_GrowthQ_1 + NGDP_GrowthY_1+",paste(colnames(data)[c((15:22),25,6)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$Inflation, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+```
+
+```{r}
+# Modification with interaction term for unemployment and time since recession, along with NGDP growth as a control:
+formula = as.formula(paste0("Inflation ~ as.factor(Dist) + as.factor(Dist):RelUnemp +NGDP_GrowthQ_1 + NGDP_GrowthY_1+",paste(colnames(data)[c((15:22),25,6)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$Inflation, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+
+stargazer(reg, type="latex",keep=(19:25), covariate.labels=c("Other","2yr Before Recession","1yr Before Recession","During Recession","1yr After Recession","2yr After Recession","3yr After Recession"), style="qje")
+
+reg1 = reg
+```
+
+
+
+```{r}
+# Modification with wage growth:
+formula = as.formula(paste0("WageGrowth ~ NBER + as.factor(NBER):RelUnemp+",paste(colnames(data)[c((21:25),(28:33),5)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$WageGrowth, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+
+```
+
+```{r}
+# Rolling linear regression:
+roll = 36
+ci = data.frame()
+formula = as.formula(paste0("Inflation ~ NBER +",paste(colnames(data)[c((15:22),25,26,6)],collapse="+")))
+for(i in (roll:dim(data)[1])){
+  reg = lm(formula, data=data[data$Date <= data$Date[i] & data$Date >= data$Date[i-roll+1],])
+  s = summary(reg)$coefficients
+  point = s[rownames(s) == "RelUnemp",1]
+  std = s[rownames(s) == "RelUnemp",2]
+  ci = rbind(ci, c(i, point, std))
+}
+colnames(ci) = c("i","point","std")
+
+plot(ci$i,ci$point, type="l")
+lines(ci$i, ci$point + 1.96*ci$std, type="l", col="red")
+lines(ci$i, ci$point - 1.96*ci$std, type="l", col="red")
+abline(h=0)
+
+
+ci = data.frame()
+#formula = as.formula(paste0("WageGrowth ~ NBER + as.factor(NBER):RelUnemp+",paste(colnames(data)[c((21:25),(28:33),5)],collapse="+")))
+formula = as.formula(paste0("WageGrowth ~ NBER +",paste(colnames(data)[c(21,22,25,26,6,(28:33))],collapse="+")))
+for(i in (roll:dim(data)[1])){
+  reg = lm(formula, data=data[data$Date <= data$Date[i] & data$Date >= data$Date[i-roll+1],])
+  s = summary(reg)$coefficients
+  point = s[rownames(s) == "RelUnemp",1]
+  std = s[rownames(s) == "RelUnemp",2]
+  ci = rbind(ci, c(i, point, std))
+}
+colnames(ci) = c("i","point","std")
+
+plot(ci$i,ci$point, type="l")
+lines(ci$i, ci$point + 1.96*ci$std, type="l", col="red")
+lines(ci$i, ci$point - 1.96*ci$std, type="l", col="red")
+abline(h=0)
+```
+
+
+```{r}
+# Modification with interaction term for unemployment and time since recession, along with NGDP growth as a control:
+formula = as.formula(paste0("WageGrowth ~ as.factor(Dist) + as.factor(Dist):RelUnemp +NGDP_GrowthQ_1 + NGDP_GrowthY_1+",paste(colnames(data)[c((15:22),25,6)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$WageGrowth, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+
+stargazer(reg, type="text",keep=(19:25), covariate.labels=c("Other","2yr Before Recession","1yr Before Recession","During Recession","1yr After Recession","2yr After Recession","3yr After Recession"))
+reg2 = reg
+```
+
+
+```{r}
+# Potential next steps:
+# Event study using more data from the past (drop some variables)
+# Indicator variables for quarters before/after recessions, interaction with Relative Unemployment
+```
+
+
+
+
+
+
+
+
+
+
+Drop variables to go further back: Exchange and RelImports
+```{r}
+#rm(list=ls())
+library(readxl)
+library(tidyr)
+library(ggplot2)
+pce =read.csv("PCEPILFE.csv") 
+unemp = read.csv("UNRATE.csv")
+nunemp = read.csv("NROU.csv")
+infE = read.csv("EXPINF1YR.csv")
+imp = read_excel("Imported.xlsx")
+dom = read_excel("Domestic.xlsx")
+np = read.csv("NonPetr.csv")
+ex = read.csv("Exchange.csv")
+nber = read.csv("NBER.csv")
+wages = read.csv("WAGES.csv")
+gdp = read.csv("GDP.csv")
+
+imp = gather(imp, Month, pImp, Jan:Dec)
+imp$DATE = as.Date(paste(imp$Year, imp$Month, "1",sep="-"), format="%Y-%h-%d")
+dom = gather(dom, Month, pDom, Jan:Dec)
+dom$DATE = as.Date(paste(dom$Year, dom$Month, "1",sep="-"), format="%Y-%h-%d")
+imp = merge(imp, dom)
+imp$rel = imp$pImp / imp$pDom
+imp$import = c(rep(NA,12),diff(log(imp$rel),lag=12))
+imp = imp[c(3,7)]
+
+data= merge(pce, unemp, all=T)
+data = merge(data, gdp, all=T)
+data = merge(data, wages, all=T)
+data = merge(data, infE, all=T)
+data = merge(data, nber, all=T)
+data = merge(data, nunemp, all=T)
+data = merge(data, np, all=T)
+data = merge(data, ex, all=T)
+data$DATE = as.Date(data$DATE)
+data = merge(data, imp, all=T)
+colnames(data)= c("Date","CPCE","Unemp","NGDP","Wages","eInf","NBER","NatUnemp","NonPetrol","Exchange","RelImports")
+data = data[!is.na(data$NatUnemp),]
+
+for(i in (2:dim(data)[1])){
+  if(is.na(data$NonPetrol[i])){
+    data$NonPetrol[i] = data$NonPetrol[i-1]
+  }
+}
+
+Lag = function(vName, k=1){
+  return(c(rep(NA,k),data[(1:(dim(data)[1]-k)),vName]))
+}
+
+data$Inflation = c(NA,diff(log(data$CPCE)))
+data$NGDP_GrowthQ = c(NA,diff(log(data$NGDP)))
+data$NGDP_GrowthY = c(rep(NA,4),diff(log(data$NGDP),4))
+
+for(i in (1:6)){
+  data[paste0("Inf_",i)] = Lag("Inflation",i)
+}
+
+
+data$Exchange = c(NA,diff(log(data$Exchange)))
+#data["eInf_1"] = Lag("eInf")
+data["RelImports_1"] = Lag("RelImports")
+
+data["Exchange_1"] = Lag("Exchange")
+
+data$NGDP_GrowthQ_1 = Lag("NGDP_GrowthQ")
+data$NGDP_GrowthY_1 = Lag("NGDP_GrowthY")
+
+data$NonPetrol = c(NA,diff(log(data$NonPetrol)))
+data["NonPetrol_1"] = Lag("NonPetrol")
+
+data$RelUnemp = (data$Unemp - data$NatUnemp) / data$Unemp
+
+# Wage Growth:
+data$WageGrowth = c(NA, diff(log(data$Wages)))
+for(i in (1:6)){
+  data[paste0("WageGrowth_",i)] = Lag("WageGrowth",i)
+}
+
+#quarters before/after recession:
+data = data[!is.na(data$NBER),]
+data$DistF = NA
+count = NA
+for(i in (1:dim(data)[1])){
+  if(data$NBER[i] == 1){
+    count = 0
+  } else {count = count + 1}
+  data[i,"DistF"] = count
+}
+
+data$DistB = NA
+count = NA
+for(j in (1:dim(data)[1])){
+  i = dim(data)[1] - j + 1
+  if(data$NBER[i] == 1){
+    count = 0
+  } else {count = count + 1}
+  data[i,"DistB"] = count
+}
+
+data$Dist = data$DistF
+data$DistB[is.na(data$DistB)] = 100
+data$Dist[data$Dist > data$DistB] = -data$DistB[data$Dist > data$DistB]
+data$Dist = ceiling(data$Dist/4)
+data$Dist[data$Dist > 3 | data$Dist < -2] = -10
+data$DistF = ceiling(data$DistF/4)
+data$DistB = ceiling(data$DistB/4)
+data = data[!is.na(data$eInf) & !is.na(data$CPCE),]
+```
+
+```{r}
+# From the paper:
+formula = as.formula(paste0("Inflation ~ NBER +",paste(colnames(data)[c((15:20),25,26,6)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$Inflation, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+```
+
+```{r}
+# Modification with interaction term for unemployment and NBER, along with NGDP growth as a control:
+formula = as.formula(paste0("Inflation ~ NBER + as.factor(NBER):RelUnemp +NGDP_GrowthQ_1 + NGDP_GrowthY_1+",paste(colnames(data)[c((15:20),25,6)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$Inflation, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+```
+
+```{r}
+# Modification with interaction term for unemployment and time since recession, along with NGDP growth as a control:
+formula = as.formula(paste0("Inflation ~ NBER + as.factor(Dist):RelUnemp +NGDP_GrowthQ_1 + NGDP_GrowthY_1+",paste(colnames(data)[c((15:20),25,6)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$Inflation, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+
+stargazer(reg, type="text",keep=(12:18), covariate.labels=c("Other","2yr Before Recession","1yr Before Recession","During Recession","1yr After Recession","2yr After Recession","3yr After Recession"))
+reg3 = reg
+```
+
+
+
+```{r}
+# Modification with wage growth:
+formula = as.formula(paste0("WageGrowth ~ as.factor(NBER) + as.factor(NBER):RelUnemp+",paste(colnames(data)[c((23:25),(28:33),5)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$WageGrowth, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+
+```
+
+```{r}
+# Modification with interaction term for unemployment and time since recession, along with NGDP growth as a control:
+formula = as.formula(paste0("WageGrowth ~  as.factor(Dist)+as.factor(Dist):RelUnemp +NGDP_GrowthQ_1 + NGDP_GrowthY_1+",paste(colnames(data)[c((15:20),25,6)],collapse="+")))
+reg = lm(formula, data=data)
+summary(reg)
+plot(data$Date, data$WageGrowth, type='l')
+lines(data$Date, reg$fitted.values, type="l",col='red')
+
+# newStd = function(name, r, v1, v2s){
+#   coef = summary(r)$coef
+#   cov = vcov(r)
+#   
+# }
+# coef = summary(reg)$coef
+stargazer(reg, type="text",keep=(17:23), covariate.labels=c("Other","2yr Before Recession","1yr Before Recession","During Recession","1yr After Recession","2yr After Recession","3yr After Recession"))
+reg4 = reg
+```
+
+```{r}
+stargazer(reg1, reg2, reg3, reg4, type="latex", keep=(20:27), style="qje", column.separate=c(2,2), column.labels=c("Controls Prioritized","Time Prioritized"),
+          covariate.labels=c("All Other Time","2yr Before Recession","1yr Before Recession","During Recession","1yr After Recession","2yr After Recession","3yr After Recession",""),
+          dep.var.labels=c("Core PCE","Wages","Core PCE","Wages"))
+```
+
